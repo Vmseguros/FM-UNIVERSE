@@ -5,6 +5,7 @@ import { competicoesService } from '../../services/competicoesService';
 import { participantesService } from '../../services/participantesService';
 import { calendarioService } from '../../services/calendarioService';
 import { clubesService } from '../../services/clubesService';
+import { dataStore } from '../../services/dataStore';
 import { noticiasService } from '../../services/noticiasService';
 import {
   Season,
@@ -230,23 +231,30 @@ export const AdminCampeonatosTemporadasPage: React.FC = () => {
 
           // Correção estrutural oficial: se não tiver exatamente 30 jogos ou tiver clube inválido
           if (compMatches.length !== 30 || hasInvalidClub) {
-            // Reabre para revisão se estiver homologada (conforme instrução administrativa)
-            if (activeSeason.status === 'HOMOLOGADA' || linkedComp.calendarStatus === 'HOMOLOGADO') {
-              activeSeason.status = 'RASCUNHO';
-              linkedComp.calendarStatus = 'RASCUNHO';
-              await temporadasService.save(activeSeason);
-              await competicoesService.save(linkedComp);
-            }
+            try {
+              // Reabre para revisão se estiver homologada (conforme instrução administrativa)
+              if (activeSeason.status === 'HOMOLOGADA' || linkedComp.calendarStatus === 'HOMOLOGADO') {
+                activeSeason.status = 'RASCUNHO';
+                linkedComp.calendarStatus = 'RASCUNHO';
+                await temporadasService.save(activeSeason);
+                await competicoesService.save(linkedComp);
+              }
 
-            // Gera o calendário oficial de 30 partidas com mando estritamente invertido
-            compMatches = await calendarioService.generateRoundRobinCalendar({
-              competitionId: linkedComp.id,
-              seasonId: activeSeason.id,
-              legs: 'TURNO_E_RETURNO',
-              baseStartDate: activeSeason.startDate || '2026-08-08',
-              selectedClubIds: validClubIds,
-              allowAdministrativeRevision: true,
-            });
+              // Gera o calendário oficial de 30 partidas com mando estritamente invertido
+              compMatches = await calendarioService.generateRoundRobinCalendar({
+                competitionId: linkedComp.id,
+                seasonId: activeSeason.id,
+                legs: 'TURNO_E_RETURNO',
+                baseStartDate: activeSeason.startDate || '2026-08-08',
+                selectedClubIds: validClubIds,
+                allowAdministrativeRevision: true,
+              });
+            } catch (calErr) {
+              console.warn('⚠️ [AdminCampeonatos] Aviso ao sincronizar/gerar calendário:', calErr);
+              if (!compMatches || compMatches.length === 0) {
+                compMatches = dataStore.getMatches().filter((m) => m.competitionId === linkedComp.id);
+              }
+            }
           }
 
           setMatches(compMatches);
@@ -746,7 +754,15 @@ export const AdminCampeonatosTemporadasPage: React.FC = () => {
       }
     });
 
-    let homeAwayInvertedInReturno = true;
+    let turnoMatchesCount = 0;
+    let returnoMatchesCount = 0;
+    matches.forEach((m) => {
+      const r = Number(m.round || m.rodada || 1);
+      if (r <= 5) turnoMatchesCount++;
+      else if (r <= 10) returnoMatchesCount++;
+    });
+
+    let inversionErrorsCount = 0;
     for (let r = 1; r <= 5; r++) {
       const tMatches = roundsMap.get(r) || [];
       const retMatches = roundsMap.get(r + 5) || [];
@@ -755,10 +771,11 @@ export const AdminCampeonatosTemporadasPage: React.FC = () => {
           (rm) => rm.homeClubId === tm.awayClubId && rm.awayClubId === tm.homeClubId
         );
         if (!matchingReturn) {
-          homeAwayInvertedInReturno = false;
+          inversionErrorsCount++;
         }
       });
     }
+    const homeAwayInvertedInReturno = inversionErrorsCount === 0 && matches.length === 30;
 
     const homeCounts: Record<string, number> = {};
     const awayCounts: Record<string, number> = {};
@@ -796,6 +813,9 @@ export const AdminCampeonatosTemporadasPage: React.FC = () => {
       isFullyCompliant,
       roundsMap,
       clubsInMatchesCount: clubsInMatches.size,
+      turnoMatchesCount,
+      returnoMatchesCount,
+      inversionErrorsCount,
     };
   }, [matches]);
 

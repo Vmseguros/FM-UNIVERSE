@@ -13,7 +13,7 @@ import { Leilao, Lance } from '../../types/leiloesV3';
 import { useAuth } from '../../contexts/AuthContext';
 
 export const ManagerLeiloesV3Page: React.FC = () => {
-  const { firebaseUser, managerProfile, managedClub, refreshClubData, refreshManagerProfile } = useAuth();
+  const { firebaseUser, user, managerProfile, managedClub, refreshClubData, refreshManagerProfile } = useAuth();
 
   // Lista de Leilões (/leiloes)
   const [leiloes, setLeiloes] = useState<Leilao[]>([]);
@@ -59,7 +59,8 @@ export const ManagerLeiloesV3Page: React.FC = () => {
   const handleSubmeterLance = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!leilaoAtivo) return;
-    if (!firebaseUser?.uid) {
+    const currentUid = firebaseUser?.uid || user?.id || managerProfile?.uid;
+    if (!currentUid) {
       setFeedback({ type: 'error', message: 'Você precisa estar autenticado para registrar um lance.' });
       return;
     }
@@ -80,8 +81,8 @@ export const ManagerLeiloesV3Page: React.FC = () => {
 
     const res = await leiloesV3Service.darLance({
       leilaoId: leilaoAtivo.id,
-      managerId: firebaseUser.uid,
-      managerName: managerProfile?.name || firebaseUser.displayName || 'Treinador',
+      managerId: currentUid,
+      managerName: managerProfile?.name || user?.name || firebaseUser?.displayName || 'Treinador',
       clubId: managedClub?.id || 'sem-clube',
       value: valorLance,
       initialBid: Number(leilaoAtivo.initialBid) || 0,

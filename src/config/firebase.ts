@@ -71,11 +71,47 @@ function createFirestoreInstance(appInstance: FirebaseApp): Firestore {
   }
 }
 
+let quotaExhausted = false;
+
+/**
+ * Registra que a cota do Firebase Firestore foi esgotada (resource-exhausted).
+ * Alterna dinamicamente a aplicação para a persistência local (dataStore),
+ * impedindo travamento de tela e erros de gravação.
+ */
+export function markFirebaseQuotaExhausted(): void {
+  if (!quotaExhausted) {
+    quotaExhausted = true;
+    console.warn('⚠️ [FM Universe] Cota diária do Firebase Firestore esgotada ou offline. Alternando para modo de persistência local autônomo.');
+  }
+}
+
+export function isFirebaseQuotaExhausted(): boolean {
+  return quotaExhausted;
+}
+
+export function checkAndHandleQuotaError(err: unknown): boolean {
+  if (!err) return false;
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  const code = (err as { code?: string })?.code?.toLowerCase() || '';
+  if (
+    code.includes('resource-exhausted') ||
+    msg.includes('resource-exhausted') ||
+    msg.includes('quota limit exceeded') ||
+    msg.includes('quota exceeded') ||
+    msg.includes('free daily read units per project')
+  ) {
+    markFirebaseQuotaExhausted();
+    return true;
+  }
+  return false;
+}
+
 /**
  * Checa se o Firebase está configurado adequadamente via variáveis de ambiente.
- * Quando ausente, a plataforma FM Universe executa no modo Fallback Mock de alta fidelidade.
+ * Quando ausente ou desabilitado, a plataforma FM Universe executa no modo Fallback Mock de alta fidelidade.
  */
 export const isFirebaseConfigured = (): boolean => {
+  if (rawEnv.VITE_DISABLE_FIREBASE === 'true') return false;
   return Boolean(
     firebaseConfig.apiKey &&
     firebaseConfig.projectId &&
@@ -83,6 +119,10 @@ export const isFirebaseConfigured = (): boolean => {
     !firebaseConfig.apiKey.includes('"') &&
     !firebaseConfig.apiKey.includes(',')
   );
+};
+
+export const isFirestoreAvailable = (): boolean => {
+  return isFirebaseConfigured() && !quotaExhausted;
 };
 
 let app: FirebaseApp | null = null;
@@ -109,7 +149,7 @@ export function getFirebaseStorage(): FirebaseStorage | null {
 }
 
 export function getFirestoreDb(): Firestore | null {
-  if (!isFirebaseConfigured()) return null;
+  if (!isFirestoreAvailable()) return null;
   if (!app) {
     app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
   }

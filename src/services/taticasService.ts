@@ -41,8 +41,7 @@ export const taticasService = {
         const docRef = doc(firestoreDb, 'taticas', clubId);
         await setDoc(docRef, tactic, { merge: true });
       } catch (err) {
-        console.error(`[FM Universe] Erro ao salvar tática do clube ${clubId} no Firestore:`, err);
-        throw err;
+        console.warn(`[FM Universe] Aviso ao salvar tática do clube ${clubId} no Firestore (usando persistência local):`, err);
       }
     }
   },

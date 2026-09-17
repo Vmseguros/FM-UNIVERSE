@@ -11,6 +11,7 @@ export interface Leilao {
   status: LeilaoStatus;
   createdBy: string;
   createdAt: string;
+  updatedAt?: string;
   
   // Metadados visuais do jogador para exibição direta
   playerAge?: number;
@@ -18,6 +19,10 @@ export interface Leilao {
   playerPosition?: string;
   playerRating?: number;
   playerPhoto?: string | null;
+
+  highestBid?: number;
+  highestBidder?: string;
+  highestBidderClub?: string;
 }
 
 export interface Lance {
