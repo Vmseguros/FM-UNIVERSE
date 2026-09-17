@@ -1,0 +1,16 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Isolamento estrito de assets visuais do clube por UID do Manager:
+    // Apenas o próprio treinador autenticado pode gravar em clubs/{uid}/*
+    // Limite estrito de tamanho: 5MB
+    // Tipos permitidos: apenas imagens (image/*)
+    match /clubs/{uid}/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null
+                   && request.auth.uid == uid
+                   && request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+  }
+}

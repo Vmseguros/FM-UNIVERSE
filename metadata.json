@@ -1,0 +1,6 @@
+{
+  "name": "FM Universe",
+  "description": "Plataforma completa de gestão e simulação de futebol inspirada no Football Manager",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

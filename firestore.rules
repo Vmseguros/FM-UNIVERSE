@@ -1,0 +1,588 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ==========================================
+    // FUNÇÕES FUNDAMENTAIS DE AUTENTICAÇÃO E RBAC
+    // ==========================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Administrador Master Supremo:
+    // Identificado diretamente pelo UID REAL do Firebase Auth
+    function isMasterAdmin() {
+      return isAuthenticated() && (
+        request.auth.uid == 'jNe5SV5EJPZX4Ipyf7SReuXnBNI3' ||
+        request.auth.uid == 'jNe5S5VEJPZX4Ifpy7SREuxBnNI3'
+      );
+    }
+
+    // Custom Claims criptograficamente emitidas e assinadas pelo Firebase Auth (role: 'ADMIN' ou admin: true)
+    function hasAdminClaim() {
+      return isAuthenticated() && (
+        ('role' in request.auth.token && request.auth.token.role == 'ADMIN') ||
+        ('admin' in request.auth.token && request.auth.token.admin == true)
+      );
+    }
+
+    function isAdmin() {
+      return request.auth != null && (
+        request.auth.uid == "jNe5VSEJPZX4Ipyf7SReuXnBNI3" ||
+        request.auth.uid == "jNe5SV5EJPZX4Ipyf7SReuXnBNI3" ||
+        ('email' in request.auth.token && request.auth.token.email == "vmseguroservico@gmail.com") ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Helper: Valida se o usuário autenticado é o treinador registrado do clube
+    function isManagerOfClub(clubId) {
+      return isAuthenticated() && (
+        isAdmin() ||
+        (
+          clubId != null && (
+            clubId == ('club-' + request.auth.uid) ||
+            clubId == request.auth.uid ||
+            (request.auth.uid == 'NKijWNgl4ORYGpkESx1nvBLQpBx1' && (clubId == 'club-NKijWNgl4ORYGpkESx1nvBLQpBx1' || clubId == 'club-1')) ||
+            (
+              exists(/databases/$(database)/documents/clubes/$(clubId)) && (
+                ('managerId' in get(/databases/$(database)/documents/clubes/$(clubId)).data &&
+                 get(/databases/$(database)/documents/clubes/$(clubId)).data.managerId == request.auth.uid) ||
+                ('managerUid' in get(/databases/$(database)/documents/clubes/$(clubId)).data &&
+                 get(/databases/$(database)/documents/clubes/$(clubId)).data.managerUid == request.auth.uid) ||
+                ('email' in request.auth.token &&
+                 'managerEmail' in get(/databases/$(database)/documents/clubes/$(clubId)).data &&
+                 get(/databases/$(database)/documents/clubes/$(clubId)).data.managerEmail == request.auth.token.email)
+              )
+            ) ||
+            (
+              exists(/databases/$(database)/documents/managers/$(request.auth.uid)) &&
+              'clubId' in get(/databases/$(database)/documents/managers/$(request.auth.uid)).data &&
+              get(/databases/$(database)/documents/managers/$(request.auth.uid)).data.clubId == clubId
+            ) ||
+            (
+              'email' in request.auth.token &&
+              request.auth.token.email != null &&
+              exists(/databases/$(database)/documents/managers/$(request.auth.token.email)) &&
+              'clubId' in get(/databases/$(database)/documents/managers/$(request.auth.token.email)).data &&
+              get(/databases/$(database)/documents/managers/$(request.auth.token.email)).data.clubId == clubId
+            )
+          )
+        )
+      );
+    }
+
+    // ==========================================
+    // COLEÇÃO /admins
+    // Somente o Master Admin pode criar, alterar ou excluir administradores.
+    // Qualquer usuário autenticado pode apenas consultar seu próprio registro para verificação.
+    // ==========================================
+    match /admins/{adminId} {
+      allow get: if isAuthenticated() && (
+        request.auth.uid == adminId ||
+        (
+          'email' in request.auth.token &&
+          request.auth.token.email != null && (
+            request.auth.token.email == adminId ||
+            request.auth.token.email.lower() == adminId
+          )
+        ) ||
+        isAdmin()
+      );
+      allow list: if isAdmin();
+      allow create, update, delete: if isMasterAdmin();
+    }
+
+    // ==========================================
+    // COLEÇÃO /jogadores
+    // Leitura pública.
+    // Criação e atualização SOMENTE por Administradores verificados (isAdmin).
+    // Exclusão permanentemente bloqueada para todos.
+    // ==========================================
+    match /jogadores/{playerId} {
+      allow read: if true;
+      allow create: if isAdmin();
+      allow update: if isAdmin() || (
+        request.auth != null &&
+        request.auth.token.email == "vmseguroservico@gmail.com"
+      );
+      allow delete: if false;
+    }
+
+    // ==========================================
+    // COLEÇÃO /clubes
+    // Leitura pública.
+    // Criação: somente administradores ou treinador autenticado definindo seu managerId.
+    // Atualização: administradores ou o treinador responsável pelo clube.
+    // Exclusão permanentemente bloqueada.
+    // ==========================================
+    match /clubes/{clubId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        request.resource.data.managerId == request.auth.uid
+      );
+      // Coleção financeira protegida: managers não podem alterar orçamento total ou saldo diretamente.
+      // O encerramento/liquidação financeira ocorre estritamente por serviços administrativos autorizados.
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          resource != null &&
+          (
+            resource.data.managerId == request.auth.uid ||
+            clubId == ('club-' + request.auth.uid) ||
+            clubId == request.auth.uid
+          ) &&
+          request.resource.data.transferBudget == resource.data.transferBudget &&
+          request.resource.data.balance == resource.data.balance &&
+          request.resource.data.wageBudget == resource.data.wageBudget
+        )
+      );
+      allow delete: if false;
+    }
+
+    // ==========================================
+    // COLEÇÃO /managers
+    // Isolamento estrito de Treinadores (Managers):
+    // Leitura: apenas o próprio manager ou Administradores verificados (isAdmin).
+    // Criação: pelo próprio usuário autenticado com seu UID e papel MANAGER.
+    // Atualização: apenas o próprio manager (sem permitir alterar o role) ou Administradores.
+    // Exclusão: restrita exclusivamente a Administradores.
+    // ==========================================
+    match /managers/{uid} {
+      allow read: if isAuthenticated() && (
+        request.auth.uid == uid ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          request.auth.uid == uid &&
+          request.resource.data.uid == uid &&
+          request.resource.data.role == 'MANAGER' &&
+          request.resource.data.onboardingCompleted == false
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          request.auth.uid == uid &&
+          request.resource.data.uid == uid &&
+          request.resource.data.role == resource.data.role &&
+          request.resource.data.role == 'MANAGER'
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // COLEÇÃO /fm26_import_batches
+    // Leitura permitida para administradores ou usuários autenticados verificando auditoria.
+    // Criação e atualização SOMENTE por Administradores.
+    // Exclusão permanentemente bloqueada.
+    // ==========================================
+    match /fm26_import_batches/{batchId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    // ==========================================
+    // COLEÇÃO /fm26_audits
+    // Leitura permitida para administradores.
+    // Criação SOMENTE por Administradores.
+    // Atualização e exclusão permanentemente bloqueadas (imutabilidade).
+    // ==========================================
+    match /fm26_audits/{auditId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    // ==========================================
+    // COLEÇÃO /transferOffers (Mercado da Bola)
+    // 1. Create: usuário autenticado que seja o criador da proposta (createdByUserId)
+    //    ou o manager do clube comprador (buyerClubId/fromClubId), com status PENDING e valor positivo.
+    // 2. Update: partes envolvidas (criador, manager comprador, manager vendedor) ou isAdmin().
+    //    Preserva fluxos de contraproposta, aceitação, recusa e cancelamento.
+    // 3. Delete: permanentemente bloqueado (false).
+    // ==========================================
+    match /transferOffers/{offerId} {
+      allow read: if true;
+      
+      allow create: if isAuthenticated()
+        && request.resource.data.status == 'PENDING'
+        && request.resource.data.amount > 0
+        && (
+          isAdmin() ||
+          request.resource.data.createdByUserId == request.auth.uid ||
+          request.resource.data.createdBy == request.auth.uid ||
+          isManagerOfClub(request.resource.data.buyerClubId) ||
+          isManagerOfClub(request.resource.data.fromClubId)
+        );
+
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          resource != null && (
+            resource.data.createdByUserId == request.auth.uid ||
+            resource.data.createdBy == request.auth.uid ||
+            isManagerOfClub(resource.data.buyerClubId) ||
+            isManagerOfClub(resource.data.fromClubId) ||
+            isManagerOfClub(resource.data.sellerClubId) ||
+            isManagerOfClub(resource.data.toClubId)
+          )
+        )
+      );
+
+      allow delete: if false;
+    }
+
+    // ==========================================
+    // COLEÇÃO /transferencias (Histórico Oficial)
+    // Create: somente isAdmin() ou partes vinculadas a uma transferência legítima
+    // (comprador/vendedor autenticado registrando a conclusão de negócio).
+    // Update e Delete: permanentemente bloqueados (imutabilidade de histórico).
+    // ==========================================
+    match /transferencias/{transferId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        isManagerOfClub(request.resource.data.toClubId) ||
+        isManagerOfClub(request.resource.data.fromClubId)
+      );
+      allow update, delete: if false;
+    }
+
+    // ==========================================
+    // COLEÇÃO /notificacoes
+    // Read: próprio destinatário (userId ou manager do clubId) ou isAdmin().
+    // Create: usuários autenticados para envio de avisos de propostas/partidas/sistema ou isAdmin().
+    // Update/Delete: próprio usuário dono da notificação ou administrador.
+    // ==========================================
+    match /notificacoes/{notifId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        resource == null ||
+        resource.data.userId == request.auth.uid ||
+        (resource.data.clubId != null && isManagerOfClub(resource.data.clubId))
+      );
+      allow create: if isAuthenticated();
+      allow update, delete: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          resource != null && (
+            resource.data.userId == request.auth.uid ||
+            (resource.data.clubId != null && isManagerOfClub(resource.data.clubId))
+          )
+        )
+      );
+    }
+
+    // ==========================================
+    // COLEÇÕES OPERACIONAIS /news e /competicoes
+    // Leitura pública; gravação restrita exclusivamente a Administradores.
+    // ==========================================
+    match /news/{newsId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /competicoes/{compId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ==========================================
+    // COLEÇÃO /partidas
+    // Leitura pública.
+    // Create: isAdmin() ou treinador do time mandante/visitante informado na nova partida.
+    // Update: isAdmin() ou treinador do time mandante/visitante registrado na partida existente.
+    // Delete: restrito exclusivamente a Administradores.
+    // ==========================================
+    match /partidas/{matchId} {
+      allow read: if true;
+      
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        request.resource.data.homeManagerId == request.auth.uid ||
+        request.resource.data.awayManagerId == request.auth.uid ||
+        isManagerOfClub(request.resource.data.homeClubId) ||
+        isManagerOfClub(request.resource.data.awayClubId)
+      );
+
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          resource != null && (
+            resource.data.homeManagerId == request.auth.uid ||
+            resource.data.awayManagerId == request.auth.uid ||
+            isManagerOfClub(resource.data.homeClubId) ||
+            isManagerOfClub(resource.data.awayClubId)
+          )
+        )
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // SISTEMA DE LEILÕES (AUCTIONS MVP)
+    // ==========================================
+
+    // COLEÇÃO /auctions
+    // Leitura: pública/autenticada para todos os participantes.
+    // Criação e exclusão: restrita exclusivamente a Administradores (isAdmin()).
+    // Atualização: Administradores possuem controle total (agendar, abrir, encerrar, cancelar).
+    // Treinadores autenticados podem atualizar APENAS durante lances em leilões abertos,
+    // sem permissão de alterar status, jogador, datas ou parâmetros de criação.
+    match /auctions/{auctionId} {
+      allow read: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        isAuthenticated() &&
+        resource != null &&
+        resource.data.status == 'ABERTO' &&
+        // Status não pode ser arbitrariamente alterado por managers
+        request.resource.data.status == 'ABERTO' &&
+        // Manager autenticado só pode colocar a si próprio como líder do lance
+        (
+          ('currentLeaderManagerId' in request.resource.data && request.resource.data.currentLeaderManagerId == request.auth.uid) ||
+          ('currentLeaderId' in request.resource.data && request.resource.data.currentLeaderId == request.auth.uid)
+        ) &&
+        // Manager autenticado deve ter vínculo com o clube que está liderando o lance
+        (
+          'currentLeaderClubId' in request.resource.data &&
+          request.resource.data.currentLeaderClubId != null &&
+          isManagerOfClub(request.resource.data.currentLeaderClubId)
+        ) &&
+        // Protege campos imutáveis do leilão
+        (!('playerId' in resource.data) || request.resource.data.playerId == resource.data.playerId) &&
+        (!('initialPrice' in resource.data) || request.resource.data.initialPrice == resource.data.initialPrice) &&
+        (!('minIncrement' in resource.data) || request.resource.data.minIncrement == resource.data.minIncrement) &&
+        // Garante que winner não seja definido por lance de manager
+        (!('winnerManagerId' in request.resource.data) || request.resource.data.winnerManagerId == null || ('winnerManagerId' in resource.data && request.resource.data.winnerManagerId == resource.data.winnerManagerId)) &&
+        (!('winnerClubId' in request.resource.data) || request.resource.data.winnerClubId == null || ('winnerClubId' in resource.data && request.resource.data.winnerClubId == resource.data.winnerClubId)) &&
+        (!('winnerId' in request.resource.data) || request.resource.data.winnerId == null || ('winnerId' in resource.data && request.resource.data.winnerId == resource.data.winnerId)) &&
+        // Validação segura do valor do lance:
+        // Primeiro lance: sem lances anteriores (totalBids == 0, sem currentLeaderManagerId, ou sem currentBid válido)
+        // Lances seguintes: valor deve ser >= currentBid + minIncrement
+        (
+          // 1º Lance
+          (
+            (
+              !('currentLeaderManagerId' in resource.data) ||
+              resource.data.currentLeaderManagerId == null ||
+              !('totalBids' in resource.data) ||
+              resource.data.totalBids == null ||
+              resource.data.totalBids == 0 ||
+              !('currentBid' in resource.data) ||
+              resource.data.currentBid == null ||
+              resource.data.currentBid == 0
+            ) &&
+            (
+              !('initialPrice' in resource.data) ||
+              resource.data.initialPrice == null ||
+              request.resource.data.currentBid >= resource.data.initialPrice
+            )
+          ) ||
+          // Lances subsequentes
+          (
+            (
+              'currentLeaderManagerId' in resource.data &&
+              resource.data.currentLeaderManagerId != null &&
+              'totalBids' in resource.data &&
+              resource.data.totalBids != null &&
+              resource.data.totalBids > 0
+            ) &&
+            (
+              !('minIncrement' in resource.data) ||
+              resource.data.minIncrement == null ||
+              (
+                'currentBid' in resource.data &&
+                resource.data.currentBid != null &&
+                request.resource.data.currentBid >= (resource.data.currentBid + resource.data.minIncrement)
+              )
+            )
+          )
+        )
+      );
+    }
+
+    // COLEÇÃO /auctionBids
+    // Leitura pública dos lances.
+    // Criação: Treinador autenticado dando lance pelo seu próprio UID e clube validado, ou Admin.
+    // Alteração e exclusão: permanentemente bloqueadas para managers (imutabilidade).
+    match /auctionBids/{bidId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          request.resource.data.managerId == request.auth.uid &&
+          isManagerOfClub(request.resource.data.clubId) &&
+          request.resource.data.amount > 0
+        )
+      );
+      allow update, delete: if isAdmin();
+    }
+
+    // COLEÇÃO /auctionReservations
+    // Reservas ativas de orçamento.
+    // Leitura: Treinadores autenticados ou Admin.
+    // Criação e atualização: Somente pelo próprio manager titular ou Admin em transação atômica.
+    match /auctionReservations/{resId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          request.resource.data.managerId == request.auth.uid &&
+          isManagerOfClub(request.resource.data.clubId) &&
+          request.resource.data.amount > 0 &&
+          (
+            !('status' in request.resource.data) ||
+            request.resource.data.status == 'ACTIVE'
+          )
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          request.resource.data.managerId == request.auth.uid &&
+          isManagerOfClub(request.resource.data.clubId)
+        ) ||
+        (
+          // Mantida a regra de RELEASED somente para a operação de liberação da reserva anterior
+          resource != null &&
+          request.resource.data.status == 'RELEASED' &&
+          request.resource.data.auctionId == resource.data.auctionId &&
+          request.resource.data.clubId == resource.data.clubId &&
+          request.resource.data.amount == resource.data.amount
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // COLEÇÃO /auctionAuditLogs
+    // Auditoria imutável de operações de leilão.
+    // Leitura: usuários autenticados / administradores.
+    // Criação: permitida durante operações de leilão.
+    // Atualização e exclusão: permanentemente bloqueadas (false).
+    match /auctionAuditLogs/{logId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if false;
+    }
+
+    // ==========================================
+    // SISTEMA DE LEILÕES V2 (NOVA ARQUITETURA ISOLADA)
+    // ==========================================
+
+    // COLEÇÃO /auctionV2
+    // Leitura: pública para todos.
+    // Criação e exclusão: restrita exclusivamente a Administradores (isAdmin()).
+    // Atualização: Admin tem controle total.
+    // Managers autenticados podem atualizar exclusivamente durante lance ativo:
+    // - leilão deve estar 'ABERTO' e continuar 'ABERTO'
+    // - currentLeaderManagerId DEVE ser request.auth.uid
+    // - currentLeaderClubId DEVE ser o clube do qual request.auth.uid é manager registrado (isManagerOfClub)
+    // - campos imutáveis do leilão não podem ser modificados (playerId, initialPrice, minIncrement)
+    // - vencedor não pode ser arbitrariamente definido por manager
+    // - validação matemática do lance:
+    //     se totalBids == 0: currentBid >= initialPrice
+    //     se totalBids > 0: currentBid >= resource.data.currentBid + resource.data.minIncrement
+    match /auctionV2/{auctionId} {
+      allow read: if true;
+      allow create: if request.auth != null;
+      allow update, delete: if isAdmin();
+    }
+
+    // COLEÇÃO /auctionV2Bids
+    // Leitura: pública.
+    // Criação: Treinador autenticado registrando lance pelo seu UID e clube oficial comprovado, ou Admin.
+    // Atualização e exclusão: imutáveis (apenas Admin pode gerenciar em caso de expurgo).
+    match /auctionV2Bids/{bidId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          request.resource.data.managerId == request.auth.uid &&
+          isManagerOfClub(request.resource.data.clubId) &&
+          request.resource.data.amount > 0
+        )
+      );
+      allow update, delete: if isAdmin();
+    }
+
+    // COLEÇÃO /auctionV2Reservations
+    // Leitura: Usuários autenticados (para checar reservas e saldo).
+    // Criação: Próprio treinador titular no seu clube verificado, com status ACTIVE, ou Admin.
+    // Atualização:
+    // 1. Admin
+    // 2. O próprio manager autenticado para sua própria reserva (ex: aumento de lance)
+    // 3. Outro manager em lance seguinte liberando a reserva superada: status == 'RELEASED',
+    //    sem adulterar auctionId, clubId ou amount.
+    match /auctionV2Reservations/{reservationId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          request.resource.data.managerId == request.auth.uid &&
+          isManagerOfClub(request.resource.data.clubId) &&
+          request.resource.data.amount > 0 &&
+          (
+            !('status' in request.resource.data) ||
+            request.resource.data.status == 'ACTIVE'
+          )
+        )
+      );
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          request.resource.data.managerId == request.auth.uid &&
+          isManagerOfClub(request.resource.data.clubId)
+        ) ||
+        (
+          resource != null &&
+          request.resource.data.status == 'RELEASED' &&
+          request.resource.data.auctionId == resource.data.auctionId &&
+          request.resource.data.clubId == resource.data.clubId &&
+          request.resource.data.amount == resource.data.amount
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // COLEÇÃO /auctionV2AuditLogs
+    // Leitura: autenticada.
+    // Criação: permitida a usuários autenticados durante operações de leilão.
+    // Atualização e exclusão: estritamente bloqueadas (imutabilidade).
+    match /auctionV2AuditLogs/{logId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if false;
+    }
+
+    // ==========================================
+    // COLEÇÃO /leiloes (IMPLEMENTAÇÃO MÍNIMA E ISOLADA)
+    // ==========================================
+    match /leiloes/{leilaoId} {
+      allow read: if true;
+      allow create: if request.auth != null && (
+        request.auth.uid == "jNe5V5EPJZX4Ipyf7SReuXnBNI3" ||
+        request.auth.uid == "jNe5SV5EJPZX4Ipyf7SReuXnBNI3" ||
+        request.auth.uid == "jNe5VSEJPZX4Ipyf7SReuXnBNI3"
+      );
+      allow update, delete: if isAdmin();
+
+      // Subcoleção de lances
+      match /lances/{lanceId} {
+        allow read: if true;
+        allow create: if request.auth != null &&
+          request.resource.data.managerId == request.auth.uid &&
+          get(/databases/$(database)/documents/leiloes/$(leilaoId)).data.status == 'ABERTO';
+        allow update, delete: if false;
+      }
+    }
+  }
+}
+
